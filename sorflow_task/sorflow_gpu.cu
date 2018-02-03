@@ -14,16 +14,16 @@ const int   studentID   = 3615831;
 *
 * In this file the following methods have to be edited or completed:
 *
-* sorflow_compute_motion_tensor_tex
-* sorflow_linear_sor_shared
-* sorflow_update_robustifications_shared
-* sorflow_nonlinear_sor_shared
-* add_flow_fields
-* bilinear_backward_warping_tex
-* sorflow_update_robustifications_warp_shared
-* sorflow_update_righthandside_shared
-* sorflow_nonlinear_warp_sor_shared
-* sorflow_gpu_nonlinear_warp
+* sorflow_compute_motion_tensor_tex            - Done
+* sorflow_linear_sor_shared                    - Done
+* sorflow_update_robustifications_shared       - Done
+* sorflow_nonlinear_sor_shared                 - Done
+* add_flow_fields                              - Done
+* bilinear_backward_warping_tex                - Done
+* sorflow_update_robustifications_warp_shared  - Done
+* sorflow_update_righthandside_shared          - Done
+* sorflow_nonlinear_warp_sor_shared            - Done
+* sorflow_gpu_nonlinear_warp                   - Done
 *
 \****************************************************************************/
 
