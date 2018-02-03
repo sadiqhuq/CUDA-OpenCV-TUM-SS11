@@ -8,8 +8,8 @@
 *
 * 
 \********* PLEASE ENTER YOUR CORRECT STUDENT NAME AND ID BELOW **************/
-const char* studentName = "John Doe";
-const int   studentID   = 1234567;
+const char* studentName = "Ramakrishna Nanjundaiah, Sadiq Huq";
+const int   studentID   = 3615831;
 /****************************************************************************\
 *
 * In this file the following methods have to be edited or completed:
@@ -32,6 +32,7 @@ const int   studentID   = 1234567;
 #include <stdio.h>
 #include "sorflow.h"
 #include "resample_gpu.cuh"
+#include <cutil_math.h>
 
 
 
@@ -323,6 +324,40 @@ __global__ void sorflow_compute_motion_tensor_tex
   // Atemporal = products of spatial and temporal derivatives as defined in the Euler-Lagrange equations
   // do that by using the image textures
 
+	//Thread indices
+	const int x = blockIdx.x * blockDim.x + threadIdx.x;
+	const int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+	//PitchBytes
+	const int pitchBytes_3 = pitchf3 * sizeof(float3);
+
+	//Offset in texture 
+	const float xx = (float)x+TEXTURE_OFFSET;
+	const float yy = (float)y+TEXTURE_OFFSET;
+
+	//Derivatives of I1 using image texture
+	const float I1_dx = (tex2D(tex_sorflow_I1,xx+1,yy) - tex2D(tex_sorflow_I1,xx-1,yy)) / (2*hx);
+	const float I1_dy = (tex2D(tex_sorflow_I1,xx,yy+1) - tex2D(tex_sorflow_I1,xx,yy-1)) / (2*hy);
+
+	//Derivatives of I2 using image texture
+	const float I2_dx = (tex2D(tex_sorflow_I2,xx+1,yy) - tex2D(tex_sorflow_I2,xx-1,yy)) / (2*hx);
+	const float I2_dy = (tex2D(tex_sorflow_I2,xx,yy+1) - tex2D(tex_sorflow_I2,xx,yy-1)) / (2*hy);
+
+	//Mean values at pixels
+	const float Ix = 0.5f * (I1_dx + I2_dx);
+	const float Iy = 0.5f * (I1_dy + I2_dy);
+
+	//It (time derivative)- Backward difference from assignment sheet
+	const float It = tex2D(tex_sorflow_I2,xx,yy) - tex2D(tex_sorflow_I1,xx,yy);	
+
+
+	//Aspatial_g storage ==> [Ix*Ix, Iy*Ix , Iy*Iy]
+	//Aspatial_g storege ==> [Ix*It, Iy*It , It*It]
+	if ( x < nx && y < ny) {
+		*((float3*) (((char*)Aspatial_g) + y*pitchBytes_3) + x) = make_float3 (Ix*Ix,Iy*Ix,Iy*Iy);
+		*((float3*) (((char*)Atemporal_g) + y*pitchBytes_3) + x) = make_float3 (Ix*It,Iy*It,It*It);
+	}		
+
 }
 
 
@@ -346,6 +381,87 @@ __global__ void sorflow_linear_sor_shared
   // ### implement me ###
 
   // solve the linear Euler-Lagrange equations resulting from quatratic penalization using shared memory 
+
+	//Thread indices
+	const int x = blockIdx.x * blockDim.x + threadIdx.x;
+	const int y = blockIdx.y * blockDim.y + threadIdx.y;
+	const int tx = threadIdx.x+1;
+	const int ty = threadIdx.y+1;
+
+	//Pitch bytes
+	const int pitchbytes_2 = pitchf2 * sizeof(float2);
+	const int pitchbytes_3 = pitchf3 * sizeof(float3);
+
+	// loading and boundary conditions
+	__shared__ float2 u[SF_BW+2][SF_BH+2];
+	const char* image = (char*)u_g + y*pitchbytes_2  + x*sizeof(float2);
+
+	//Boundary conditions
+	if (x < nx && y < ny) {
+		u[tx][ty] = *( (float2*)image );
+
+		if (x == 0)
+			u[threadIdx.x][ty] = u[tx][ty];
+		else if (x == nx-1)
+			u[tx+1][ty] = u[tx][ty];
+		else {
+			if (threadIdx.x == 0) u[0][ty] = *(((float2*)image)-1);
+			else if (threadIdx.x == blockDim.x-1) u[tx+1][ty] = *(((float2*)image)+1);
+		}
+
+		if (y == 0)
+			u[tx][0] = u[tx][ty];
+		else if (y == ny-1)
+			u[tx][ty+1] = u[tx][ty];
+		else {
+			if (threadIdx.y == 0) u[tx][0] = *( (float2*)(image-pitchbytes_2) );
+			else if (threadIdx.y == blockDim.y-1) u[tx][ty+1] = *( (float2*)(image+pitchbytes_2) );
+		}
+	}
+
+
+	__syncthreads();
+
+	if((x+y)%2 == red){
+
+		// ### implement me ###
+		//{a = alpha, b = beta, c = gamma, d = delta} = 1 for linear!!!
+		if (x < nx && y < ny){
+			float a = 1.f;
+			float b = 1.f;
+			float c = 1.f;
+			float d = 1.f;
+
+
+			//Setting values at boundaries
+			if (x >= nx) a = 0;
+			if (x <= 0)  b = 0;
+			if (y >= ny) c = 0;
+			if (y <= 0)  d = 0;
+
+			//term_1 = value from the four neighbouring points
+			float2 term_1 =  make_float2 (
+					( a * u[tx-1][ty].x + b * u[tx+1][ty].x + c * u[tx][ty-1].x + d * u[tx][ty+1].x),
+					( a * u[tx-1][ty].y + b * u[tx+1][ty].y + c * u[tx][ty-1].y + d * u[tx][ty+1].y) );
+
+			//Spatial derivatives
+			const float3 s = *((float3*)(((char*)Aspatial_g) + y*pitchbytes_3)+ x);
+
+			//Temporal derivaties
+			const float3 t = *((float3*)(((char*)Atemporal_g) + y*pitchbytes_3)+ x);
+
+			//Implemetation of iteration
+			float u1 = ( (lambda * term_1.x) - (s.y * u[tx][ty].y + t.x))/ (s.x + lambda * (a+b+c+d));
+			float u2 = ( (lambda * term_1.y) - (s.y * u[tx][ty].x + t.y))/ (s.z + lambda * (a+b+c+d));
+
+			float temp1 = (1-relaxation) * u[tx][ty].x + relaxation * u1;
+			float temp2 = (1-relaxation) * u[tx][ty].y + relaxation * u2;
+
+			//copy output to u_g
+			*((float2*) (((char*)u_g) + y*pitchbytes_2) + x) = make_float2(temp1,temp2);	
+
+		}	  	  
+	}	
 
 }
 
@@ -435,6 +551,76 @@ __global__ void sorflow_update_robustifications_shared
 	// ### implement me ###
 
   // update the penalty functions
+	//Thread indices
+	const int x = blockIdx.x * blockDim.x + threadIdx.x;
+	const int y = blockIdx.y * blockDim.y + threadIdx.y;
+	const int tx = threadIdx.x+1;
+	const int ty = threadIdx.y+1;
+
+	//Pitch bytes
+	const int pitchbytes_2 = pitchf2 * sizeof(float2);
+	const int pitchbytes_3 = pitchf3 * sizeof(float3);
+
+	//Loading  shared memory
+	__shared__ float2 u[SF_BW+2][SF_BH+2];
+	const char* image = (char*)u_g + y*pitchbytes_2  + x*sizeof(float2);
+
+	// loading and boundary conditions
+	if (x < nx && y < ny) {
+		u[tx][ty] = *( (float2*)image );
+
+		if (x == 0)
+			u[threadIdx.x][ty] = u[tx][ty];
+		else if (x == nx-1)
+			u[tx+1][ty] = u[tx][ty];
+		else {
+			if (threadIdx.x == 0) u[0][ty] = *(((float2*)image)-1);
+			else if (threadIdx.x == blockDim.x-1) u[tx+1][ty] = *(((float2*)image)+1);
+		}
+
+		if (y == 0)
+			u[tx][0] = u[tx][ty];
+		else if (y == ny-1)
+			u[tx][ty+1] = u[tx][ty];
+		else {
+			if (threadIdx.y == 0) u[tx][0] = *( (float2*)(image-pitchbytes_2) );
+			else if (threadIdx.y == blockDim.y-1) u[tx][ty+1] = *( (float2*)(image+pitchbytes_2) );
+		}
+	}
+
+	__syncthreads();
+
+
+	if (x < nx && y < ny){
+
+		//Spatial derivatives
+		const float3 s = *((float3*)(((char*)Aspatial_g) + y*pitchbytes_3)+ x);
+
+		//Temporal derivaties
+		const float3 t = *((float3*)(((char*)Atemporal_g) + y*pitchbytes_3)+ x);
+
+
+		//Euler _ Lagrange equation, data term
+		const float phi_data = 1.f/(2.f * sqrt(data_epsilon + s.x * u[tx][ty].x *u[tx][ty].x+
+				s.z * u[tx][ty].y *u[tx][ty].y + t.z + 
+				2.f * s.y * u[tx][ty].x *u[tx][ty].y+
+				2.f * t.y * u[tx][ty].y+
+				2.f * t.x * u[tx][ty].x));
+
+
+		//Derivatives of u1 and u2 - central
+		const float u1_dx = 0.5f*(u[tx+1][ty].x-u[tx-1][ty].x);
+		const float u1_dy = 0.5f*(u[tx][ty+1].x-u[tx][ty-1].x);
+
+		const float u2_dx = 0.5f*(u[tx+1][ty].y-u[tx-1][ty].y);
+		const float u2_dy = 0.5f*(u[tx][ty+1].y-u[tx][ty-1].y);
+
+		//Euler _ Lagrange equation, data term
+		const float phi_diff =  1.f/(2.f * sqrt(diff_epsilon + u1_dx*u1_dx+ u1_dy*u1_dy
+				+	u2_dx*u2_dx + u2_dy *u2_dy ));
+
+		*((float2*) (((char*)penalty_g) + y*pitchbytes_2) + x) = make_float2(phi_data,phi_diff);
+	}	  	  
 
 }
 
@@ -460,6 +646,107 @@ __global__ void sorflow_nonlinear_sor_shared
 {
 
   // ### implement me ### 
+	const int pitchbytes_2 = pitchf2 * sizeof(float2);
+	const int pitchbytes_3 = pitchf3 * sizeof(float3);
+
+	//Thread Indices
+	const int x = blockIdx.x * blockDim.x + threadIdx.x;
+	const int y = blockIdx.y * blockDim.y + threadIdx.y;
+	const int tx = threadIdx.x+1;
+	const int ty = threadIdx.y+1;
+
+	//Image and penalty
+	const char* image = (char*)u_g + y*pitchbytes_2  + x*sizeof(float2);
+	const char* p = (char*)penalty_g + y*pitchbytes_2  + x*sizeof(float2);
+
+	//Loading into shared mmory
+	__shared__ float2 u[SF_BW+2][SF_BW+2];//for image
+	__shared__ float2 g[SF_BW+2][SF_BW+2];//for p
+
+
+	// loading and boundary conditions
+	if (x < nx && y < ny) {
+		u[tx][ty] = *((float2*)image);
+		g[tx][ty] = *((float2*)p);
+
+		if (x == 0) {
+			u[threadIdx.x][ty] = u[tx][ty];
+			g[threadIdx.x][ty] = g[tx][ty];
+		}
+		else if (x == nx-1) {
+			u[tx+1][ty] = u[tx][ty];
+			g[tx+1][ty] = g[tx][ty];
+		}
+		else {
+			if (threadIdx.x == 0) {
+				u[0][ty] = *(((float2*)image)-1);
+				g[0][ty] = *(((float2*)p)-1);
+			}
+			else if (threadIdx.x == blockDim.x-1) {
+				u[tx+1][ty] = *(((float2*)image)+1);
+				g[tx+1][ty] = *(((float2*)p)+1);
+			}
+		}
+
+		if (y == 0) {
+			u[tx][0] = u[tx][ty];
+			g[tx][0] = g[tx][ty];
+		}
+		else if (y == ny-1) {
+			u[tx][ty+1] = u[tx][ty];
+			g[tx][ty+1] = g[tx][ty];
+		}
+		else {
+			if (threadIdx.y == 0) {
+				u[tx][0] = *((float2*)(image-pitchbytes_2));
+				g[tx][0] = *((float2*)(p-pitchbytes_2));
+			}
+			else if (threadIdx.y == blockDim.y-1) {
+				u[tx][ty+1] = *((float2*)(image+pitchbytes_2));
+				g[tx][ty+1] = *((float2*)(p+pitchbytes_2));
+			}
+		}
+
+	}
+
+	__syncthreads();
+
+
+	if (x < nx && y < ny){
+
+		//Spatial derivatives
+		const float3 s = *((float3*)(((char*)Aspatial_g) + y*pitchbytes_3)+ x);
+
+		//Temporal derivaties
+		const float3 t = *((float3*)(((char*)Atemporal_g) + y*pitchbytes_3)+ x);
+
+		//Calculation of a,b,c,d - only y field of p
+		float a = 0.5 * (g[tx+1][ty].y+g[tx][ty].y);
+		float b = 0.5 * (g[tx-1][ty].y+g[tx][ty].y);
+		float c = 0.5 * (g[tx][ty].y+g[tx][ty+1].y);
+		float d = 0.5 * (g[tx][ty].y+g[tx][ty-1].y);
+
+
+		//Setting values at boundaries
+		if (x >= nx) a = 0;
+		if (x <= 0)  b = 0;
+		if (y >= ny) c = 0;
+		if (y <= 0)  d = 0;
+
+		float2 term_1 =  make_float2 (
+				( a * u[tx+1][ty].x + b * u[tx-1][ty].x + c * u[tx][ty+1].x + d * u[tx][ty-1].x),
+				( a * u[tx+1][ty].y + b * u[tx-1][ty].y + c * u[tx][ty+1].y + d * u[tx][ty-1].y) );
+
+		//Implemetation of iteration
+		float u1 = ( (lambda * term_1.x) - (s.y * u[tx][ty].y*g[tx][ty].x  + t.x*g[tx][ty].x ))/ (s.x*g[tx][ty].x + lambda * (a+b+c+d));
+		float u2 = ( (lambda * term_1.y) - (s.y * u[tx][ty].x*g[tx][ty].x  + t.y*g[tx][ty].x ))/ (s.z*g[tx][ty].x + lambda * (a+b+c+d));
+
+		float temp1 = (1-relaxation) * u[tx][ty].x + relaxation * u1;
+		float temp2 = (1-relaxation) * u[tx][ty].y + relaxation * u2;
+
+		*((float2*) (((char*)u_g) + y*pitchbytes_2) + x) = make_float2(temp1,temp2);
+
+	}
 
 }
 
@@ -570,6 +857,18 @@ __global__ void add_flow_fields
 {
 
   // ### implement me ### 
+	//pitch bytes
+	const int pitchbytes_2 = pitchf2 * sizeof(float2);
+
+	//Thread indices
+	const int x = blockIdx.x * blockDim.x + threadIdx.x;
+	const int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+	//Adding fields
+	if (x < nx && y< ny){
+
+		*((float2*) (((char*)u0_g) + y*pitchbytes_2) + x) += *((float2*) (((char*)u_g) + y*pitchbytes_2) + x);
+	}
 
 }
 
@@ -592,9 +891,23 @@ __global__ void bilinear_backward_warping_tex
   // nx, ny is the grid size
   // hx, hy is the size of a single grid cell this method is working on
 
+	//pitch bytes
+	const int pitchbytes_2 = pitchf2 * sizeof(float2);
+
+	//Thread indices
+	const int x = blockIdx.x * blockDim.x + threadIdx.x;
+	const int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+	if (x < nx && y< ny){
+
+		float2 u = *((float2*) (((char*)u_g) + y*pitchbytes_2) + x);
+		float2 h = make_float2(hx,hy);
+		float2 xy = make_float2 ( (float)x , (float)y );
+		float2 tex = xy + u/h +TEXTURE_OFFSET;
+		f2_warped_g[x + y * pitchf1] = tex2D(tex_sorflow_I2,tex.x,tex.y);		
+
+	}
 }
-
-
 
 
 
@@ -620,6 +933,99 @@ __global__ void sorflow_update_robustifications_warp_shared
   
   // update the penalty functions
 
+	const int pitchbytes_2 = pitchf2 * sizeof(float2);
+	const int pitchbytes_3 = pitchf3 * sizeof(float3);
+
+	//Thread Indices
+	const int x = blockIdx.x * blockDim.x + threadIdx.x;
+	const int y = blockIdx.y * blockDim.y + threadIdx.y;
+	const int tx = threadIdx.x+1;
+	const int ty = threadIdx.y+1;
+
+	//Image and penalty
+	const char* image = (char*)u_g + y*pitchbytes_2  + x*sizeof(float2);
+	const char* d_image = (char*)du_g + y*pitchbytes_2  + x*sizeof(float2);
+
+	//Loading into shared mmory
+	__shared__ float2 u[SF_BW+2][SF_BW+2];//for known
+	__shared__ float2 g[SF_BW+2][SF_BW+2];//for unknown 
+
+
+	// load data into shared memory
+	if (x < nx && y < ny) {
+		u[tx][ty] = *((float2*)image);
+		g[tx][ty] = *((float2*)d_image);
+
+		if (x == 0) {
+			u[threadIdx.x][ty] = u[tx][ty];
+			g[threadIdx.x][ty] = g[tx][ty];
+		}
+		else if (x == nx-1) {
+			u[tx+1][ty] = u[tx][ty];
+			g[tx+1][ty] = g[tx][ty];
+		}
+		else {
+			if (threadIdx.x == 0) {
+				u[0][ty] = *(((float2*)image)-1);
+				g[0][ty] = *(((float2*)d_image)-1);
+			}
+			else if (threadIdx.x == blockDim.x-1) {
+				u[tx+1][ty] = *(((float2*)image)+1);
+				g[tx+1][ty] = *(((float2*)d_image)+1);
+			}
+		}
+
+		if (y == 0) {
+			u[tx][0] = u[tx][ty];
+			g[tx][0] = g[tx][ty];
+		}
+		else if (y == ny-1) {
+			u[tx][ty+1] = u[tx][ty];
+			g[tx][ty+1] = g[tx][ty];
+		}
+		else {
+			if (threadIdx.y == 0) {
+				u[tx][0] = *((float2*)(image-pitchbytes_2));
+				g[tx][0] = *((float2*)(d_image-pitchbytes_2));
+			}
+			else if (threadIdx.y == blockDim.y-1) {
+				u[tx][ty+1] = *((float2*)(image+pitchbytes_2));
+				g[tx][ty+1] = *((float2*)(d_image+pitchbytes_2));
+			}
+		}
+
+	}
+
+	__syncthreads();
+
+	if (x < nx && y < ny){
+
+		//Spatial derivatives
+		const float3 s = *((float3*)(((char*)Aspatial_g) + y*pitchbytes_3)+ x);
+
+		//Temporal derivaties
+		const float3 t = *((float3*)(((char*)Atemporal_g) + y*pitchbytes_3)+ x);
+		//Data term
+		const float phi_data = 1.f/(2.f * sqrt(data_epsilon + s.x * g[tx][ty].x *g[tx][ty].x+
+				s.z * g[tx][ty].y *g[tx][ty].y + t.z + 
+				2.f * s.y * g[tx][ty].x *g[tx][ty].y+
+				2.f * t.y * g[tx][ty].y+
+				2.f * t.x * g[tx][ty].x));
+
+		//Derivatives  - central
+		const float u1_dx = 0.5f*( u[tx+1][ty].x + g[tx+1][ty].x - u[tx-1][ty].x - g[tx-1][ty].x)/hx;
+		const float u1_dy = 0.5f*( u[tx][ty+1].x + g[tx][ty+1].x - u[tx][ty-1].x - g[tx][ty-1].x)/hy;
+
+		const float u2_dx = 0.5f*( u[tx+1][ty].y + g[tx+1][ty].y - u[tx-1][ty].y - g[tx-1][ty].y)/hx;
+		const float u2_dy = 0.5f*( u[tx][ty+1].y + g[tx][ty+1].y - u[tx][ty-1].y - g[tx][ty-1].y)/hy;
+
+		//Diff term
+		const float phi_diff =  1.f/(2.f * sqrt(diff_epsilon + u1_dx*u1_dx+ u1_dy*u1_dy
+				+	u2_dx*u2_dx + u2_dy *u2_dy ));
+
+		*((float2*) (((char*)penalty_g) + y*pitchbytes_2) + x) = make_float2(phi_data,phi_diff);
+
+	}
 }
 
 
@@ -642,7 +1048,103 @@ __global__ void sorflow_update_righthandside_shared
 {
 
   // ### implement me ### 
+	//Thread Indices
+	const int x = blockIdx.x * blockDim.x + threadIdx.x;
+	const int y = blockIdx.y * blockDim.y + threadIdx.y;
+	const int tx = threadIdx.x+1;
+	const int ty = threadIdx.y+1;
 
+	//Pitch bytes
+	const int pitchbytes_2 = pitchf2 * sizeof(float2);
+	const int pitchbytes_3 = pitchf3 * sizeof(float3);
+
+	const char* image = (char*)u_g + y*pitchbytes_2 + x*sizeof(float2);
+	const char* penalty = (char*)penalty_g + y*pitchbytes_2 + x*sizeof(float2);
+
+	//Shared Memory
+	__shared__ float2 u[SF_BW+2][SF_BH+2];
+	__shared__ float2 g[SF_BW+2][SF_BH+2];
+
+	// loading and boundary conditions
+	if (x < nx && y < ny) {
+		u[tx][ty] = *( (float2*)image );
+		g[tx][ty] =  *( (float2*)penalty );
+
+		if (x == 0) {
+			u[0][ty] = u[tx][ty];
+			g[0][ty] = g[tx][ty];
+		}
+		else if (x == nx-1) {
+			u[tx+1][ty] = u[tx][ty];
+			g[tx+1][ty] = g[tx][ty];
+		}
+		else {
+			if (threadIdx.x == 0) {
+				u[0][ty] = *( ((float2*)image)-1 );
+				g[0][ty] = *( ((float2*)penalty)-1 );
+			}
+			else if (threadIdx.x == blockDim.x-1) {
+				u[tx+1][ty] = *( ((float2*)image)+1 );
+				g[tx+1][ty] = *( ((float2*)penalty)+1 );
+			}
+		}
+
+		if (y == 0)  {
+			u[tx][0] = u[tx][ty];
+			g[tx][0] = g[tx][ty];
+		}
+		else if (y == ny-1) {
+			u[tx][ty+1] = u[tx][ty];
+			g[tx][ty+1] = g[tx][ty];
+		}
+		else {
+			if (threadIdx.y == 0) {
+				u[tx][0] = *( (float2*)(image-pitchbytes_2) );
+				g[tx][0] = *( (float2*)(penalty-pitchbytes_2) );
+			}
+			else if (threadIdx.y == blockDim.y-1) {
+				u[tx][ty+1] = *( (float2*)(image+pitchbytes_2) );
+				g[tx][ty+1] = *( (float2*)(penalty+pitchbytes_2) );
+			}
+		}
+	}
+	__syncthreads();	
+
+	if(x < nx && y < ny)
+	{
+		float3 t = *((float3*)(((char*)Atemporal_g) + y*pitchbytes_3)+ x);		
+
+
+		float a = 0.5 * (g[tx+1][ty].y+g[tx][ty].y);
+		float b = 0.5 * (g[tx-1][ty].y+g[tx][ty].y);
+		float c = 0.5 * (g[tx][ty].y+g[tx][ty+1].y);
+		float d = 0.5 * (g[tx][ty].y+g[tx][ty-1].y);
+
+
+		//Setting values at boundaries
+		if (x >= nx) a = 0;
+		if (x <= 0)  b = 0;
+		if (y >= ny) c = 0;
+		if (y <= 0)  d = 0;
+
+
+		const float2 div = 
+				((a * u[tx+1][ty]) / (hx * hx)) +
+				((b *  u[tx-1][ty]) / (hx * hx)) +
+				((c * u[tx][ty+1]) / (hy * hy)) +
+				((d * u[tx][ty-1]) / (hy * hy)) -
+
+				(
+						((a + b) * u[tx][ty] / (hx * hx)) +
+						((c + d) * u[tx][ty] / (hy * hy))
+				);
+
+
+		*((float2*)(((char*)b_g) + y*pitchbytes_2)+ x) = make_float2(
+				-g[tx][ty].x * t.x + lambda * div.x,
+				-g[tx][ty].x * t.y + lambda * div.y );		
+
+	}
 }
 
 
@@ -667,7 +1169,114 @@ __global__ void sorflow_nonlinear_warp_sor_shared
 
   // ### implement me ### 
 
-}
+	const int pitchbytes_2 = pitchf2 * sizeof(float2);
+	const int pitchbytes_3 = pitchf3 * sizeof(float3);
+
+	//Thread Indices
+	const int x = blockIdx.x * blockDim.x + threadIdx.x;
+	const int y = blockIdx.y * blockDim.y + threadIdx.y;
+	const int tx = threadIdx.x+1;
+	const int ty = threadIdx.y+1;
+
+	//Image and penalty
+	const char* du = (char*)du_g + y*pitchbytes_2 + x*sizeof(float2);
+	const char* penalty = (char*)penalty_g + y*pitchbytes_2 + x*sizeof(float2);
+	
+	//Loading into shared mmory
+	__shared__ float2 u[SF_BW+2][SF_BW+2];//for known
+	__shared__ float2 g[SF_BW+2][SF_BW+2];//for unknown 
+
+
+	if (x < nx && y < ny) {
+
+		u[tx][ty] = *( (float2*)du );
+		g[tx][ty] = *( (float2*)penalty );
+
+		if (x == 0) {
+			u[0][ty] = u[tx][ty];
+			g[0][ty] = g[tx][ty];
+		}
+		else if (x == nx-1) {
+			u[tx+1][ty] =  u[tx][ty];
+			g[tx+1][ty] = g[tx][ty];
+		}
+		else {
+			if (threadIdx.x == 0) {
+				u[0][ty] = *( ((float2*)du)-1 );
+				g[0][ty] = *( ((float2*)penalty)-1 );
+			}
+			else if (threadIdx.x == blockDim.x-1) {
+				u[tx+1][ty] = *( ((float2*)du)+1 );
+				g[tx+1][ty] = *( ((float2*)penalty)+1 );
+			}
+		}
+
+		if (y == 0)  {
+			u[tx][0] = u[tx][ty];
+			g[tx][0] = g[tx][ty];
+		}
+		else if (y == ny-1) {
+			u[tx][ty+1] = u[tx][ty];
+			g[tx][ty+1] = g[tx][ty];
+		}
+		else {
+			if (threadIdx.y == 0) {
+				u[tx][0] = *( (float2*)(du-pitchbytes_2) );
+				g[tx][0] = *( (float2*)(penalty-pitchbytes_2) );
+			}
+			else if (threadIdx.y == blockDim.y-1) {
+				u[tx][ty+1] = *( (float2*)(du+pitchbytes_2) );
+				g[tx][ty+1] = *( (float2*)(penalty+pitchbytes_2) );
+			}
+		}// end load if
+	} // end load 
+
+
+	__syncthreads();
+
+	if((x+y)%2 == red){
+
+		// ### implement me ###
+		if (x < nx && y < ny){
+
+			float a = 0.5 * (g[tx+1][ty].y+g[tx][ty].y);
+			float b = 0.5 * (g[tx-1][ty].y+g[tx][ty].y);
+			float c = 0.5 * (g[tx][ty].y+g[tx][ty+1].y);
+			float d = 0.5 * (g[tx][ty].y+g[tx][ty-1].y);
+
+			//Setting values at boundaries
+			if (x >= nx) a = 0;
+			if (x <= 0)  b = 0;
+			if (y >= ny) c = 0;
+			if (y <= 0)  d = 0;
+
+
+			const float2 term_1 =   
+					((a * u[tx+1][ty]) / (hx * hx)) +
+					((b * u[tx-1][ty]) / (hx * hx)) +
+					((c * u[tx][ty+1]) / (hy * hy)) +
+					((d * u[tx][ty-1]) / (hy * hy));
+			
+			//Spatial derivatives
+			const float3 s = *((float3*)(((char*)Aspatial_g) + y*pitchbytes_3)+ x);
+
+			//Implemetation of iteration
+			const float2 bg = *((float2*)(((char*)b_g) + y*pitchbytes_2)+ x);
+	
+			float2 value;
+			value.x = (1.0f / (g[tx][ty].x * s.x + lambda *( (a + b) / (hx * hx) + (c + d) / (hy * hy) ))) 	
+													* (bg.x + lambda * term_1.x - g[tx][ty].x * s.y * u[tx][ty].y);		
+
+			value.y = (1.0f / (g[tx][ty].x * s.z + lambda *( (a + b) / (hx * hx) + (c + d) / (hy * hy) )))	
+												   * (bg.y + lambda * term_1.y - g[tx][ty].x * s.y * u[tx][ty].x);		
+
+			*((float2*)(((char*)du_g ) + y*pitchbytes_2)+ x) = (1.0f - relaxation) * u[tx][ty] + 
+					relaxation * value;
+		}	  	  
+	}	
+
+
+} // End func
 
 
 void sorflow_gpu_nonlinear_warp_level
@@ -807,25 +1416,64 @@ void sorflow_gpu_nonlinear_warp
 	for(rec_depth = max_rec_depth; rec_depth >= 0; rec_depth--)
 	{
     // ### implement the computation of the incremental flow du_g for each level ###
+		nx_fine = (int)(pow(rescale_factor, rec_depth) * nx + 0.5f);
+		ny_fine = (int)(pow(rescale_factor, rec_depth) * ny + 0.5f);
 
     // ### setup level grid dimensions
+		hx_fine = ((float)nx/nx_fine);
+		hy_fine = ((float)ny/ny_fine);
 
     // ## resample the images to the grid dimensions
+		resample_area_2d_tex(I1_g, nx, ny, pitchf1, I1_resampled_g, nx_fine, ny_fine, pitchf1);
+		resample_area_2d_tex(I2_g, nx, ny, pitchf1, I2_resampled_g, nx_fine, ny_fine, pitchf1);
 
     // ### bind textures to resampled images 
-
+		bind_textures(I1_resampled_g, I2_resampled_g, nx_fine, ny_fine, pitchf1);
 
     // ### if not at the coarsest level, resample flow from coarser level
+		if(rec_depth != max_rec_depth)
+			resample_area_2d_tex(u_g, nx_coarse, ny_coarse, pitchf1, u_g, nx_fine, ny_fine, pitchf2, b_g);
 
 		if(rec_depth >= end_level)
 		{
 
       // ### Warp the second image towards the first one, and bind
       // ### the texture for the second image to it
+			bilinear_backward_warping_tex<<<dimGrid, dimBlock>>>(
+					u_g,
+					I2_resampled_warped_g,
+					nx_fine,
+					ny_fine, 
+					hx_fine, 
+					hy_fine, 
+					pitchf1, 
+					pitchf2);
+
+
+			update_textures(I2_resampled_warped_g, nx_fine, ny_fine, pitchf1);
 
       // ### Call the function computing the incremental flow for the level
+			sorflow_gpu_nonlinear_warp_level(u_g, 
+					du_g, 
+					Aspatial_g, 
+					Atemporal_g, 
+					b_g, 
+					penalty_g, 
+					nx_fine, 
+					ny_fine, 
+					pitchf2, 
+					pitchf3, 
+					hx_fine, 
+					hy_fine,
+					lambda,
+					relaxation,
+					outer_iterations,
+					inner_iterations,
+					data_epsilon,
+					diff_epsilon);
 
       // ### add the incremental flow du_g to the coarser flow u_g
+			add_flow_fields<<<dimGrid, dimBlock>>>(du_g, u_g, nx_fine, ny_fine, pitchf2);
 		}
 
 		nx_coarse = nx_fine;
