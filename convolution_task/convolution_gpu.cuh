@@ -66,9 +66,9 @@ __global__ void gpu_convolutionInterleavedRGB_dsm_cm_d(const float3 *inputImage,
 void gpu_convolutionInterleavedRGB(const float *inputImage, const float *kernel, float *outputImage,
                                    int iWidth, int iHeight, int kRadiusX, int kRadiusY, int mode=5);
 
-__global__ void gpu_ImageFloat3ToFloat4_d(const float3 *inputImage, float4 *outputImage, int iWidth, int iHeight, int iPitchBytes, size_t oPitchBytes);
+__global__ void gpu_ImageFloat3ToFloat4(const float3 *inputImage, float4 *outputImage, int iWidth, int iHeight, int iPitchBytes, size_t oPitchBytes);
 
-__global__ void gpu_convolutionInterleavedRGB_tex_cm_d(float3 *outputImage,
+__global__ void gpu_convolutionInterleavedRGB_tex_cm_d(const float4 *inputImage, float3 *outputImage,
     int iWidth, int iHeight, int kRadiusX, int kRadiusY, size_t oPitchBytes);
 
 

@@ -8,8 +8,8 @@
 *
 * 
 \********* PLEASE ENTER YOUR CORRECT STUDENT NAME AND ID BELOW **************/
-const char* gpu_studentName = "John Doe";
-const int   gpu_studentID   = 1234567;
+const char* gpu_studentName = "Sadiq Huq";
+const int   gpu_studentID   = 3273623;
 /****************************************************************************\
 *
 * In this file the following methods have to be edited or completed:
@@ -18,9 +18,9 @@ const int   gpu_studentID   = 1234567;
 * gpu_convolutionGrayImage_gm_cm_d
 * gpu_convolutionGrayImage_sm_d
 * gpu_convolutionGrayImage_sm_cm_d
-* gpu_convolutionGrayImage_dsm_cm_d
-* gpu_convolutionInterleavedRGB_dsm_cm_d
-* gpu_convolutionInterleavedRGB_tex_cm_d
+* gpu_convolutionGrayImage_dsm_cm_d 
+* gpu_convolutionInterleavedRGB_dsm_cm_d - Mode 5 interleaved 
+* gpu_convolutionInterleavedRGB_tex_cm_d -  Model 6 interleaved
 *
 \****************************************************************************/
 
@@ -36,12 +36,10 @@ const int   gpu_studentID   = 1234567;
 
 #define BW 16                 // block width
 #define BH 16                 // block height
-#define MAXKERNELRADIUS    20
+#define MAXKERNELSIZE 3000    // actual size, i.e. NOT the byte size
 
-#define MAXKERNELSIZE      MAXKERNELRADIUS*MAXKERNELRADIUS
-#define MAXSHAREDMEMSIZE   (BW+2*MAXKERNELRADIUS)*(BH+2*MAXKERNELRADIUS)
 
-// Note: MAXSHAREDMEMSIZE <= 4000 should hold for most graphic cards to work
+
 
 
 // constant memory block on device
@@ -75,10 +73,40 @@ __global__ void gpu_convolutionGrayImage_gm_d(const float *inputImage, const flo
 {
 
   // ### implement me ### 
+	int temp_x,temp_y;
+	float sum;
+	const int kWidth  = (kRadiusX<<1) + 1;
+	const int kHeight = (kRadiusY<<1) + 1;
+	
+	const uint thposX = threadIdx.x + blockIdx.x * blockDim.x;
+	const uint thposY = threadIdx.y + blockIdx.y * blockDim.y;
+
+//	
+	if (thposX >=iWidth || thposY >=iHeight)
+		return;
+	sum=0;
+	for (int y=0;y<kHeight;y++)
+	{
+		for (int x=0;x<kWidth;x++)
+		{
+			temp_x= thposX + x - kRadiusX;
+			temp_y= thposY + y - kRadiusY;
+			
+			if(temp_x < 0)
+				temp_x=0;
+			if(temp_x >= iWidth)
+				temp_x=iWidth-1;
+			if(temp_y < 0)
+				temp_y=0;
+			if(temp_y >= iHeight)
+				temp_y=iHeight-1;
+
+			sum = sum+kernel[y*kPitch+x]*inputImage[temp_x+temp_y*iPitch];
+		}
+	}
+	outputImage[thposY*iPitch+thposX] = sum;	
 
 }
-
-
 
 // mode 2: using global memory and constant memory
 __global__ void gpu_convolutionGrayImage_gm_cm_d(const float *inputImage, float *outputImage,
@@ -86,25 +114,112 @@ __global__ void gpu_convolutionGrayImage_gm_cm_d(const float *inputImage, float 
                                               size_t iPitch)
 {
 
-  // ### implement me ### 
+	int temp_x,temp_y;
+	float sum;
 
+	const int kWidth  = (kRadiusX<<1) + 1;
+	const int kHeight = (kRadiusY<<1) + 1;
+
+	const uint thposX = threadIdx.x + blockIdx.x * blockDim.x;
+	const uint thposY = threadIdx.y + blockIdx.y * blockDim.y;
+
+
+	if (thposX >=iWidth || thposY >=iHeight)
+		return;
+	sum=0;
+	for (int y=0;y<kHeight;y++)
+	{
+		for (int x=0;x<kWidth;x++)
+		{
+			temp_x = thposX + x - kRadiusX;
+			temp_y = thposY + y - kRadiusY;
+			
+			if(temp_x < 0)
+				temp_x=0;
+			if(temp_x >= iWidth)
+				temp_x=iWidth-1;
+			if(temp_y < 0)
+				temp_y=0;
+			if(temp_y >= iHeight)
+				temp_y=iHeight-1;
+
+			sum = sum+constKernel[y*kWidth+x]*inputImage[temp_x+temp_y*iPitch];
+		}
+	}
+	outputImage[thposY*iPitch+thposX] = sum;		
 }
 
 
-
-
-// mode 3: using shared memory for image and globel memory for kernel access
+// mode 3: using shared memory for image and global memory for kernel access
 __global__ void gpu_convolutionGrayImage_sm_d(const float *inputImage, const float *kernel, float *outputImage,
                                               int iWidth, int iHeight, int kRadiusX, int kRadiusY,
                                               size_t iPitch, size_t kPitch)
 {
-  // make use of the constant MAXSHAREDMEMSIZE in order to define the shared memory size
+  // make use of the constant MAXKERNELSIZE in order to define the shared memory size
   
-  // ### implement me ### 
+	__shared__ float sdata[MAXKERNELSIZE];
+
+	  const uint thposX = threadIdx.x + blockIdx.x * blockDim.x;
+	  const uint thposY = threadIdx.y + blockIdx.y * blockDim.y;
+	  
+	  outputImage[thposX + thposY * iPitch] = 0;
+
+	  const uint width = (kRadiusX << 1) + BW; 	
+	  const uint height = (kRadiusY << 1) + BH;
+
+	  const uint blockPixels = BW * BH;   		
+	  const uint totalPixels = width * height;	
+
+	  const uint startX = blockIdx.x * blockDim.x - kRadiusX;
+	  const uint startY = blockIdx.y * blockDim.y - kRadiusY;
+
+	  const uint threadPos = threadIdx.x + threadIdx.y * blockDim.x;
+
+	  uint offset = 0;
+
+	  while(offset < totalPixels)
+	  {		    
+		  int temp_x,temp_y;
+		  temp_x=startX + ((threadPos + offset) % width);
+		  temp_y=startY + ((threadPos + offset) / width);
+		  if(temp_x < 0)
+			  temp_x=0;
+		  if(temp_x >= iWidth)
+			  temp_x=iWidth-1;
+		  if(temp_y < 0)
+			  temp_y=0;
+		  if(temp_y >= iHeight)
+			  temp_y=iHeight-1;
+
+		  if(offset + threadPos < totalPixels)  
+			  sdata[offset + threadPos] = inputImage[temp_x + temp_y * iPitch];
+		  offset += blockPixels; // stride
+	  }
+	  
+	  __syncthreads();
+	  
+//	  outputImage[thposX + thposY * iPitch]=sdata[offset + blockPos];
+	  
+	    const int kWidth  = (kRadiusX<<1) + 1;
+	  	const int kHeight = (kRadiusY<<1) + 1;
+	  	
+	  if(thposX < iWidth && thposY < iHeight)
+	  {	    
+	    float sum = 0.0f;
+	          
+	    const int blockWidth = blockDim.x + (kRadiusX<<1);
+	    const int blockHeight = blockDim.y + (kRadiusY<<1);
+
+	    for (int y = 0; y < kHeight; ++y)
+	    	for (int x = 0; x < kWidth; ++x) {
+	    		const int sharedY = threadIdx.y + y;
+	    		const int sharedX = threadIdx.x + x;
+	    		sum += sdata[sharedY * blockWidth + sharedX] * kernel[y * kPitch + x];
+	    	}
+	    outputImage[thposX + thposY * iPitch] = sum; 
+    
+	  }
 }
-
-
-
 
 
 // mode 4: using shared memory for image and constant memory for kernel access
@@ -112,9 +227,74 @@ __global__ void gpu_convolutionGrayImage_sm_cm_d(const float *inputImage, float 
                                               int iWidth, int iHeight, int kRadiusX, int kRadiusY,
                                               size_t iPitch)
 {
-  // make use of the constant MAXSHAREDMEMSIZE in order to define the shared memory size
-  
-  // ### implement me ### 
+  // make use of the constant MAXKERNELSIZE in order to define the shared memory size
+	  
+			__shared__ float sdata[MAXKERNELSIZE];
+
+		  // Global position of thread in image coordinates 
+		  const uint thposX = threadIdx.x + blockIdx.x * blockDim.x;
+		  const uint thposY = threadIdx.y + blockIdx.y * blockDim.y;
+		  
+		  outputImage[thposX + thposY * iPitch] = 0;  // Debug black
+
+		  // apron => extra boundary space. width = block + apron region
+		  const uint width = (kRadiusX << 1) + BW; 	
+		  const uint height = (kRadiusY << 1) + BH;
+
+		  // 16x16 number of pixels in block   BW = blockDim.x 
+		  const uint blockPixels = BW * BH;   		
+		  // number of pixels in (256 + apron pixels)
+		  const uint totalPixels = width * height;	
+
+		  // (block+apron)-region in image pixel coordinates  
+		  // first pixel of each block, same for all threads in a particular block
+		  const uint startX = blockIdx.x * blockDim.x - kRadiusX;
+		  const uint startY = blockIdx.y * blockDim.y - kRadiusY;
+		      
+		  // y*rowsize + x => linear pos of the pixel thread in block
+		  const uint threadPosInBlock = threadIdx.x + threadIdx.y * blockDim.x;
+		 
+		  uint offset = 0;
+
+		  while(offset < totalPixels)
+		  {		    
+			  int temp_x,temp_y;
+				temp_x=startX + ((threadPosInBlock + offset) % width);
+				temp_y=startY + ((threadPosInBlock + offset) / width);
+				if(temp_x < 0)
+					temp_x=0;
+				if(temp_x >= iWidth)
+					temp_x=iWidth-1;
+				if(temp_y < 0)
+					temp_y=0;
+				if(temp_y >= iHeight)
+					temp_y=iHeight-1;
+					
+			    if(offset + threadPosInBlock < totalPixels)  
+					      sdata[offset + threadPosInBlock] = inputImage[temp_x + temp_y * iPitch];
+		    offset += blockPixels; 
+		    
+		  }
+		  
+		  __syncthreads();
+		  
+		    // convolution -  image on shared memory 
+		  
+		    const int kWidth  = (kRadiusX<<1) + 1;
+		  	const int kHeight = (kRadiusY<<1) + 1;
+		  	
+		  if(thposX < iWidth && thposY < iHeight)
+		  {
+		    float sum = 0.0f;
+		    for (int y = 0; y < kHeight; ++y)
+		    	for (int x = 0; x < kWidth; ++x) {
+		    		const int sharedY = threadIdx.y + y;
+		    		const int sharedX = threadIdx.x + x;
+		    		sum += sdata[sharedY * width + sharedX] * constKernel[y * kWidth + x];
+		    	}
+
+		    outputImage[thposX + thposY * iPitch] = sum; 	
+		  }
 
 } 
 
@@ -127,10 +307,74 @@ __global__ void gpu_convolutionGrayImage_dsm_cm_d(const float *inputImage, float
 {
 
   // ### implement me ### 
+	extern __shared__ float sdata[];
+
+	  // Global position of thread in image coordinates 
+	  const uint thposX = threadIdx.x + blockIdx.x * blockDim.x;
+	  const uint thposY = threadIdx.y + blockIdx.y * blockDim.y;
+	  
+//	  outputImage[thposX + thposY * iPitch] = 0;  // Debug black
+
+	  // apron => extra boundary space. width = block + apron region
+	  const uint width = (kRadiusX << 1) + BW; 	
+	  const uint height = (kRadiusY << 1) + BH;
+
+	  // 16x16 number of pixels in block   BW = blockDim.x 
+	  const uint blockPixels = BW * BH;   		
+	  // number of pixels in (256 + apron pixels)
+	  const uint totalPixels = width * height;	
+
+	  // (block+apron)-region in image pixel coordinates  
+	  // first pixel of each block, same for all threads in a particular block
+	  const uint startX = blockIdx.x * blockDim.x - kRadiusX;
+	  const uint startY = blockIdx.y * blockDim.y - kRadiusY;
+	      
+	  // y*rowsize + x => linear pos of the pixel thread in block
+	  const uint threadPosInBlock = threadIdx.x + threadIdx.y * blockDim.x;
+	 
+	  uint offset = 0;
+
+	  while(offset < totalPixels)
+	  {		    
+		  int temp_x,temp_y;
+			temp_x=startX + ((threadPosInBlock + offset) % width);
+			temp_y=startY + ((threadPosInBlock + offset) / width);
+			if(temp_x < 0)
+				temp_x=0;
+			if(temp_x >= iWidth)
+				temp_x=iWidth-1;
+			if(temp_y < 0)
+				temp_y=0;
+			if(temp_y >= iHeight)
+				temp_y=iHeight-1;
+				
+		    if(offset + threadPosInBlock < totalPixels)  
+				      sdata[offset + threadPosInBlock] = inputImage[temp_x + temp_y * iPitch];
+	    offset += blockPixels; 
+	    
+	  }
+	  
+	  __syncthreads();
+	  
+	    // convolution -  image on shared memory 
+	  
+	    const int kWidth  = (kRadiusX<<1) + 1;
+	  	const int kHeight = (kRadiusY<<1) + 1;
+	  	
+	  if(thposX < iWidth && thposY < iHeight)
+	  {
+	    float sum = 0.0f;
+	    for (int y = 0; y < kHeight; ++y)
+	    	for (int x = 0; x < kWidth; ++x) {
+	    		const int sharedY = threadIdx.y + y;
+	    		const int sharedX = threadIdx.x + x;
+	    		sum += sdata[sharedY * width + sharedX] * constKernel[y * kWidth + x];
+	    	}
+
+	    outputImage[thposX + thposY * iPitch] = sum; 	
+	  }
 
 } 
-
-
 
 
 // mode 6: using texture memory for image and constant memory for kernel access
@@ -158,7 +402,6 @@ __global__ void gpu_convolutionGrayImage_tex_cm_d(const float *inputImage, float
 
   outputImage[y*iPitch + x] = value;
 }
-
 
 
 
@@ -267,23 +510,87 @@ void gpu_convolutionRGB(const float *inputImage, const float *kernel, float *out
 
 
 
-
 // mode 5 (interleaved): using shared memory for image and constant memory for kernel access
 __global__ void gpu_convolutionInterleavedRGB_dsm_cm_d(const float3 *inputImage, float3 *outputImage,
                                               int iWidth, int iHeight, int kRadiusX, int kRadiusY,
                                               size_t iPitchBytes)
 {
-  const int x = blockIdx.x * blockDim.x + threadIdx.x;
-  const int y = blockIdx.y * blockDim.y + threadIdx.y;
+	extern __shared__ float3 sdata3[];
 
-  float3 value = make_float3(0.0f, 0.0f, 0.0f);
+	// Global position of thread in image coordinates 
+	const uint thposX = threadIdx.x + blockIdx.x * blockDim.x;
+	const uint thposY = threadIdx.y + blockIdx.y * blockDim.y;
+
+	//	  outputImage[thposX + thposY * iPitch] = 0;  // Debug black
+
+	// apron => extra boundary space. width = block + apron region
+	const uint width = (kRadiusX << 1) + BW; 	
+	const uint height = (kRadiusY << 1) + BH;
+
+	const uint blockPixels = BW * BH;   		// 16x16 number of pixels in block   BW = blockDim.x 
+	const uint totalPixels = width * height;	// number of pixels in (256 + apron pixels)
+
+	// (block+apron)-region in image pixel coordinates  
+	// first pixel of each block, same for all threads in a particular block
+	const uint startX = blockIdx.x * blockDim.x - kRadiusX;
+	const uint startY = blockIdx.y * blockDim.y - kRadiusY;
+
+	// x + y*rowsize  => linear pos of the pixel thread in block
+	const uint threadPosInBlock = threadIdx.x + threadIdx.y * blockDim.x;
+
+	uint offset = 0;
+
+	while(offset < totalPixels)
+	{		    
+		int temp_x,temp_y;
+		temp_x=startX + ((threadPosInBlock + offset) % width);
+		temp_y=startY + ((threadPosInBlock + offset) / width);
+		if(temp_x < 0)
+			temp_x=0;
+		if(temp_x >= iWidth)
+			temp_x=iWidth-1;
+		if(temp_y < 0)
+			temp_y=0;
+		if(temp_y >= iHeight)
+			temp_y=iHeight-1;
+
+		if(offset + threadPosInBlock < totalPixels)
+			sdata3[offset + threadPosInBlock] = *((float3*)(((char*)inputImage) + temp_y*iPitchBytes) + temp_x);
+		//	 sdata3[offset + threadPosInBlock] = inputImage[temp_x + temp_y * iPitchBytes];
+		offset += blockPixels; 
+
+	}
+
+	__syncthreads();
+		
+	// convolution -  image on shared memory 
+
+	const int kWidth  = (kRadiusX<<1) + 1;
+	const int kHeight = (kRadiusY<<1) + 1;
+
+	if(thposX < iWidth && thposY < iHeight)
+	{
+		float3 sum = make_float3(0.0f, 0.0f, 0.0f);
+
+		for (int y = 0; y < kHeight; ++y)
+		{
+			for (int x = 0; x < kWidth; ++x) {
+				const int sharedY = threadIdx.y + y;
+				const int sharedX = threadIdx.x + x;
+
+				sum.x += constKernel[y * kWidth + x] * sdata3[sharedX + sharedY * width].x;
+				sum.y += constKernel[y * kWidth + x] * sdata3[sharedX + sharedY * width].y;
+				sum.z += constKernel[y * kWidth + x] * sdata3[sharedX + sharedY * width].z;
+//				sum += sdata[sharedY * width + sharedX] * constKernel[y * kWidth + x];
+			}
+		}
+		*((float3*)(((char*)outputImage) + thposY*iPitchBytes)+ thposX) = sum;	
+		
+	}
+	
 
 
-  // ### implement me ### 
-
-  *((float3*)(((char*)outputImage) + y*iPitchBytes)+ x) = value;
 } 
-
 
 
 
@@ -302,15 +609,37 @@ __global__ void gpu_ImageFloat3ToFloat4_d(const float3 *inputImage, float4 *outp
 
 
 
+
 // mode 6 (interleaved): using texture memory for image and constant memory for kernel access
 __global__ void gpu_convolutionInterleavedRGB_tex_cm_d(float3 *outputImage,
     int iWidth, int iHeight, int kRadiusX, int kRadiusY, size_t oPitchBytes)
 {
+	// ### implement me ### 
+	const int x = blockIdx.x * blockDim.x + threadIdx.x;
+	const int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-  // ### implement me ### 
+	if (x >= iWidth || y >= iHeight) return;
 
+	const float xx = (float)x;
+	const float yy = (float)y;
+	const int kWidth = (kRadiusX<<1) + 1;
+
+	int xk, yk;
+	float3 value = make_float3(0.0f, 0.0f, 0.0f);
+
+	float4 imageVal;
+	for (xk=-kRadiusX; xk <= kRadiusX; xk++) 	  {
+		for (yk=-kRadiusY; yk <= kRadiusY; yk++)   {
+			imageVal = tex2D(tex_ImageF4,xx+xk,yy+yk);
+			value.x += constKernel[(yk+kRadiusY)*kWidth + xk+kRadiusX] * imageVal.x;
+			value.y += constKernel[(yk+kRadiusY)*kWidth + xk+kRadiusX] * imageVal.y;
+			value.z += constKernel[(yk+kRadiusY)*kWidth + xk+kRadiusX] * imageVal.z;
+		}
+	}
+
+	*((float3*)(((char*)outputImage) + y*oPitchBytes) + x) = value;
+//	*((float3*)(((char*)outputImage) + y*oPitchBytes) + x) = make_float3(0,0,0);
 }
-
 
 
 void gpu_convolutionInterleavedRGB(const float *inputImage, const float *kernel, float *outputImage,

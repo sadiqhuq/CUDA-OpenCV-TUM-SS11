@@ -29,6 +29,11 @@ void square_array_cpu(float *a, unsigned int numElements)
 __global__ void square_array_kernel(float *a, unsigned int numElements)
 {
   // kernel code
+	int i = blockDim.x * blockIdx.x + threadIdx.x;
+	  if (i < numElements ){
+	    a[i] = a[i]*a[i]; 
+	  }
+
 }
 
 
@@ -39,22 +44,22 @@ __host__ void square_array_gpu(float *a_host, unsigned int numElements)
   size_t size = numElements*sizeof(float);
 
   // allocate memory on the device
-  
+  cudaMalloc((void **) &a_device, size); 
 
   // copy array from host to device memory
-  
+  cudaMemcpy(a_device, a_host, size, cudaMemcpyHostToDevice);
 
   // do calculation on device
   int block_size = 4;
   int grid_size = numElements/block_size + (numElements%block_size ? 1:0);
   
-    
+    square_array_kernel <<< grid_size, block_size>>> (a_device, numElements);
   
   // Retrieve result from device and store it in host array
-  
+  cudaMemcpy(a_host, a_device, size, cudaMemcpyDeviceToHost);
 
   // free device memory
-  
+  cudaFree(a_device);
 }
 
 
